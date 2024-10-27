@@ -1,0 +1,272 @@
+---
+title: "scratch"
+date: "261024"
+format: pdf
+editor_options:
+  markdown:
+    wrap: 80
+---
+
+How is the Population Stability Index defined in the Credit Risk context?
+
+The Population Stability Index (PSI) is a measure of the change in the
+distribution of a population over time. It is commonly used in the credit risk
+context to assess the stability of a model's inputs or predictions across
+different time periods or populations.
+
+The estimator of the PSI is constructed by binning the two samples using common
+bins and is given by:
+
+$$
+\text{PSI} = \sum_{j = 1}^{B} (p_{j} - q_{j}) \times \log \frac{p_{j}}{q_{j}}
+$$
+
+where:
+
+- $p_{j}$ is the proportion of observations in the reference population that
+  fall into the $j^{\text{th}}$ bin,
+- $q_{j}$ is the proportion of observations in the comparison population that
+  fall into the $j^{\text{th}}$ bin, and
+- $B$ is the number of bins.
+
+**Reference:** Research/2024/bg/103-population-stability-index-psi
+
+<!-- ####################################################################### -->
+
+What information-theoretic quantity is the Population Stability Index (PSI)
+equivalent to?
+
+A symmetrized Kullback-Leibler divergence, typically computed using a discrete
+approximation of the continuous density using coarse bins.
+
+To see this, start from the PSI:
+
+$$
+\text{PSI} = \sum_{j} (p_{j} - q_{j}) \times \log \frac{p_{j}}{q_{j}} .
+$$
+
+Split the difference $(p_{j} - q_{j})$ into two terms:
+
+$$
+\text{PSI} = \sum_{j} \left[ p_{j} \times \log \frac{p_{j}}{q_{j}}  - q_{j} \times \log \frac{p_{j}}{q_{j}}  \right].
+$$
+
+Recognize that:
+
+$$
+- q_{j} \times \log \frac{p_{j}}{q_{j}}  = q_{j} \times \log \frac{q_{j}}{p_{j}}.
+$$
+
+So the PSI becomes:
+
+$$
+\text{PSI} = \sum_{j} \left[ p_{j} \times \log \frac{p_{j}}{q_{j}}  + q_{j} \times \log \frac{q_{j}}{p_{j}}  \right].
+$$
+
+This is exactly the sum of the KL divergences in both directions:
+
+$$
+\text{PSI} = D_{\text{KL}}(p \parallel q) + D_{\text{KL}}(q \parallel p).
+$$
+
+**Reference:** Research/2024/bg/103-population-stability-index-psi
+
+<!-- ####################################################################### -->
+
+What are the industry standards in Credit Risk modeling around reasonable 
+cutoffs for Population Stability Indices (PSIs) when used in model monitoring?
+
+The typically cited thresholds are:
+
+- a PSI value below 0.1 indicates that the distribution of the reference and
+  comparison populations is stable.
+- a PSI value between 0.1 and 0.25 suggests that there is a moderate change in
+  the distribution.
+- a PSI value above 0.25 indicates a significant change in the distribution.
+
+**Reference:** N. Siddiqi, *Intelligent Credit Scoring: Building and Implementing Better Credit Risk Scorecards* (John Wiley & Sons, 2017).
+
+**Reference:** Research/2024/bg/103-population-stability-index-psi
+
+<!-- ####################################################################### -->
+
+# Setup
+
+```{r}
+# library(FNN) # from `o1-preview`'s suggestion
+library(RANN)  # from `gpt4o`'s suggestion
+library(ggplot2)
+library(dplyr)
+```
+
+# Options
+
+```{r}
+# Sample size
+n <- 1e5
+
+# Reference population parameters
+alpha_p <- 2
+beta_p <- 5
+
+# Comparison population parameters
+alpha_q <- 5
+beta_q <- 2
+```
+
+# Simulate
+
+```{r}
+data_p <- rbeta(n, alpha_p, beta_p)
+data_q <- rbeta(n, alpha_q, beta_q)
+```
+
+# Get Density Estimates Using Histograms with Freedman-Diaconis Rule
+
+```{r}
+samples <- data.frame(data = c(data_p, data_q),
+                      group = rep(c("Reference", "Comparison"), each = n))
+
+samples %>%
+  ggplot(aes(x = data, y = after_stat(density), color = group)) +
+  geom_step(stat = "bin", direction = "mid",
+            binwidth = function(x) 2*IQR(x) / (length(x))^(1/3)) +
+  theme_minimal()
+```
+
+# Function to calculate PSI for given bin size
+
+```{r}
+calculate_PSI <- function(data_p, data_q, bins) {
+  # Create common bins based on combined data
+  breaks <- seq(min(c(data_p, data_q)), max(c(data_p, data_q)), length.out = bins + 1)
+  
+  # Compute counts for each bin
+  p_counts <- hist(data_p, breaks = breaks, plot = FALSE)$counts
+  q_counts <- hist(data_q, breaks = breaks, plot = FALSE)$counts
+  
+  # Convert counts to proportions
+  p_prop <- p_counts / sum(p_counts)
+  q_prop <- q_counts / sum(q_counts)
+  
+  # Avoid division by zero and log(0) by adding a small value
+  epsilon <- 1e-10
+  p_prop <- pmax(p_prop, epsilon)
+  q_prop <- pmax(q_prop, epsilon)
+  
+  # Calculate PSI
+  PSI <- sum((p_prop - q_prop) * log(p_prop / q_prop))
+  
+  return(PSI)
+}
+```
+
+```{r}
+# Calculate PSI for different bin sizes
+number_of_bins <- c(5, 10, 20, 50, 100, 1000)
+PSI_values <- sapply(number_of_bins, function(bins) calculate_PSI(data_p, data_q, bins))
+```
+
+# Estimate PSI using k-nearest neighbor estimators of KL divergence
+
+```{r}
+kl_divergence_knn <- function(x, y, k = 5) {
+  # x: Samples from distribution P (n x d matrix)
+  # y: Samples from distribution Q (m x d matrix)
+  # k: Number of nearest neighbors for the k-NN estimate
+  
+  n <- nrow(x)
+  m <- nrow(y)
+  d <- ncol(x)
+  
+  # Find the k-th nearest neighbor distances in P
+  nn_x <- nn2(x, x, k = k + 1)  # k+1 because first neighbor is the point itself
+  dist_x <- nn_x$nn.dists[, k + 1]  # Take the k-th nearest neighbor
+  
+  # Find the k-th nearest neighbor distances in Q
+  nn_y <- nn2(y, x, k = k)  # Nearest neighbors of x in y
+  dist_y <- nn_y$nn.dists[, k]  # Take the k-th nearest neighbor
+  
+  # Compute KL divergence estimate
+  kl_estimate <- mean(log(dist_y / dist_x)) * d + log(m / (n - 1))
+  
+  return(kl_estimate)
+}
+
+# Compute KL divergences
+D_KL_pq <- kl_divergence_knn(matrix(data_p, ncol = 1), matrix(data_q, ncol = 1))
+D_KL_qp <- kl_divergence_knn(matrix(data_q, ncol = 1), matrix(data_p, ncol = 1))
+
+# Compute PSI based on kNN estimator
+PSI_kNN <- D_KL_pq + D_KL_qp
+```
+
+<!-- `o1`s suggestion
+
+```{r}
+# Convert data to matrices
+data_p_mat <- matrix(data_p, ncol = 1)
+data_q_mat <- matrix(data_q, ncol = 1)
+
+k <- 5  # Number of nearest neighbors
+
+# Compute distances for data_p
+rho_p <- get.knn(data_p_mat, k = k)$nn.dist[, k]  # Distances in data_p
+nu_p <- get.knnx(data_q_mat, data_p_mat, k = k)$nn.dist[, k]  # Distances from data_p to data_q
+
+# Compute distances for data_q
+rho_q <- get.knn(data_q_mat, k = k)$nn.dist[, k]  # Distances in data_q
+nu_q <- get.knnx(data_p_mat, data_q_mat, k = k)$nn.dist[, k]  # Distances from data_q to data_p
+
+# Compute KL divergences
+D_KL_pq <- (1 / n) * sum(log(nu_p / rho_p))
+D_KL_qp <- (1 / n) * sum(log(nu_q / rho_q))
+
+# Compute PSI based on kNN estimator
+PSI_kNN <- D_KL_pq + D_KL_qp
+```
+
+-->
+
+```{r}
+print(paste("PSI estimated using kNN method:", PSI_kNN))
+```
+
+# Compute the Population PSI Using Numerical Integration
+
+```{r}
+# Define the PDFs of the reference and comparison populations
+pdf_p <- function(x) dbeta(x, alpha_p, beta_p)
+pdf_q <- function(x) dbeta(x, alpha_q, beta_q)
+
+# Integrand
+integrand <- function(x) {
+  p <- pdf_p(x)
+  q <- pdf_q(x)
+  
+  I <- (p - q) * log(p / q)
+  
+  I <- ifelse(is.nan(I), 0, I)
+  
+  I
+}
+
+# Compute the PSI using numerical integration using `integrate()`
+PSI_true <- integrate(integrand, lower = 0, upper = 1)$value
+
+print(paste("PSI using numerical integration:", PSI_true))
+```
+
+# Show True PSI and Estimates of PSI using kNN and Naive Histogram-based Estimates
+
+```{r}
+ggplot(PSI_results, aes(x = Bins, y = PSI)) +
+  geom_line() +
+  geom_point() +
+  geom_hline(yintercept = PSI_true, linetype = "solid", color = "blue") +
+  geom_hline(yintercept = PSI_kNN, linetype = "dashed", color = "red") +
+  labs(title = "PSI vs. Bin Sizes", x = "Number of Bins", y = "PSI") +
+  theme_minimal()
+```
+
+
